@@ -41,82 +41,81 @@ class mel_TextSplitNode:
                 cleaned_lines.append(line)
         text = "\n".join(cleaned_lines)
         
-        # --- パターンマッチング：手動番号指定 "数字:" を検出 ---
+        # 入力されたシード値で乱数生成器を初期化
+        rng = random.Random(seed)
+        
+        # "1:" や "3.5:" などのパターンを検出
         pattern = re.compile(r"(\d+(?:\.\d+)*):")
-        matches = list(pattern.finditer(text))
+        matches = pattern.finditer(text)
 
         tokens = []
         assigned_numbers = {}  # {トークン: [割り当てられた番号リスト]}
         manual_numbers = set()
+
         last_index = 0
-        current_manual = None  # 現在の手動番号（次のトークンにのみ適用）
+        current_numbers = None
 
         for match in matches:
             start, end = match.span()
             numbers = list(map(int, match.group(1).split('.')))
-            # 手動番号を更新（次のトークンに対してのみ適用する）
-            current_manual = numbers
-            manual_numbers.update(numbers)
-            
-            # マッチ直前のテキストを処理
+
+            # 直前のテキストを delimiter で区切る
             if last_index < start:
                 chunk = text[last_index:start].strip()
                 if chunk:
                     sub_tokens = chunk.split(delimiter)
-                    for i, sub_token in enumerate(sub_tokens):
+                    for sub_token in sub_tokens:
                         sub_token = sub_token.strip()
                         if sub_token:
                             tokens.append(sub_token)
-                            # 最初のトークンに対してのみ、すでにcurrent_manualが設定されていれば適用
-                            if i == 0 and current_manual is not None:
-                                assigned_numbers[sub_token] = current_manual
-                                current_manual = None  # 適用済みなのでリセット
-                            else:
-                                assigned_numbers[sub_token] = []
-            last_index = end
+                            assigned_numbers[sub_token] = current_numbers or []
+            current_numbers = numbers
+            manual_numbers.update(numbers)
+            last_index = end  # 「数字:」の後ろから新しいトークンを探す
 
-        # 最後の部分の処理（matches 後のテキスト）
+        # 最後の部分を処理
         if last_index < len(text):
             chunk = text[last_index:].strip()
             if chunk:
                 sub_tokens = chunk.split(delimiter)
-                for i, sub_token in enumerate(sub_tokens):
+                for sub_token in sub_tokens:
                     sub_token = sub_token.strip()
                     if sub_token:
                         tokens.append(sub_token)
-                        if i == 0 and current_manual is not None:
-                            assigned_numbers[sub_token] = current_manual
-                            current_manual = None
-                        else:
-                            assigned_numbers[sub_token] = []
+                        assigned_numbers[sub_token] = current_numbers or []
 
-        # 手動番号が設定されなかったトークンには自動番号を割り当てる
+        # delimiter で分割されたものに番号が割り振られていない場合、小さい番号を割り振る
         available_numbers = set(range(1, len(tokens) + 1)) - manual_numbers
         num_iterator = iter(sorted(available_numbers))
+
         sorted_tokens = []
         sorted_numbers = []
 
         for token in tokens:
-            if not assigned_numbers[token]:
+            if not assigned_numbers[token]:  # 番号がない場合、小さい番号を割り振る
                 assigned_numbers[token] = [next(num_iterator)]
             sorted_tokens.append(token)
             sorted_numbers.append(".".join(map(str, assigned_numbers[token])))
 
         # --- 選択処理 ---
+        # selected_number は文字列入力（例："2 5"）なので、空でない場合はその数字に該当するトークンを選ぶ
         selected_tokens = []
         selected_token_numbers = []
         if selected_number.strip():
+            # 入力された文字列を空白で分割し、各値を文字列として扱う
             selected_numbers_list = selected_number.strip().split()
+            # 選択されたトークン（その番号リスト内に指定の数字があるかどうかで判断）
             for t, n in zip(sorted_tokens, sorted_numbers):
                 number_list = n.split('.')
                 if any(num in number_list for num in selected_numbers_list):
                     selected_tokens.append(t)
                     selected_token_numbers.append(n)
         
-        rng = random.Random(seed)
+        # random_select が True の場合、不足分をランダムに補完する
         if random_select:
             if len(selected_tokens) < max_outputs:
                 needed = max_outputs - len(selected_tokens)
+                # 既に選ばれていない候補を作成
                 candidates = [
                     (t, n) for t, n in zip(sorted_tokens, sorted_numbers)
                     if t not in selected_tokens
@@ -126,10 +125,13 @@ class mel_TextSplitNode:
                     for t, n in additional:
                         selected_tokens.append(t)
                         selected_token_numbers.append(n)
+                # もし candidates が空の場合はそのままになる
+            # もし selected_tokens が空（selected_number が指定されなかった場合）はランダム選択
             if not selected_tokens:
                 selected_indices = rng.sample(range(len(sorted_tokens)), min(max_outputs, len(sorted_tokens)))
                 selected_tokens = [sorted_tokens[i] for i in selected_indices]
                 selected_token_numbers = [sorted_numbers[i] for i in selected_indices]
+        # selected_number が空かつ random_select が False の場合は、シーケンシャルモード（seed を利用して開始位置を決定）
         elif not selected_tokens:
             start_index = seed % len(sorted_tokens)
             selected_indices = [(start_index + i) % len(sorted_tokens) for i in range(max_outputs)]
@@ -137,9 +139,9 @@ class mel_TextSplitNode:
             selected_token_numbers = [sorted_numbers[i] for i in selected_indices]
 
         text_output = ",".join(selected_tokens)
-        number_output = ",".join(selected_token_numbers)
-        return (text_output, number_output)
+        number_output = ",".join(selected_token_numbers)  # 選ばれたトークンの番号のみ出力
 
+        return (text_output, number_output)
 
 class mel_TextSplitNode2:
     @classmethod
