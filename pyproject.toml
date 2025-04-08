@@ -1,0 +1,14 @@
+[project]
+name = "ComfyUI_Mel_Nodes"
+description = ""
+version = "1.0.0"
+license = {file = "LICENSE"}
+
+[project.urls]
+Repository = "https://github.com/nako-nakoko/ComfyUI-Mel-Nodes"
+#  Used by Comfy Registry https://comfyregistry.org
+
+[tool.comfy]
+PublisherId = "nakoko"
+DisplayName = "ComfyUI_Mel_Nodes"
+Icon = ""
