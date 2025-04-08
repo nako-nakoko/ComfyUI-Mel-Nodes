@@ -1,6 +1,6 @@
 [project]
 name = "ComfyUI_Mel_Nodes"
-description = ""
+description = "Custom nodes with split, random, and select functions for easy visual and management of multiple cumbersome prompts"
 version = "1.0.0"
 license = {file = "LICENSE"}
 
