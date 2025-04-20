@@ -6,8 +6,12 @@ import os
 import torch
 import folder_paths 
 import comfy.sd
+import datetime
+from PIL import Image, ImageSequence
+from io import BytesIO
+import numpy as np
 
-MAX_OUTPUTS = 20
+MAX_OUTPUTS = 20  # 最大出力数の定数
 
 class mel_TextSplitNode:
     @classmethod
@@ -15,9 +19,10 @@ class mel_TextSplitNode:
         return {
             "required": {
                 "text": ("STRING", {"multiline": True}),
-                "delimiter": ("STRING", {"default": "/"}),
+                "delimiter": ("STRING", {"default": " "}),
                 "max_outputs": ("INT", {"default": 5, "min": 1, "max": 999}),
                 "random_select": ("BOOLEAN", {"default": False}),
+                # selected_number を文字列として受け取る（例："2 5"）
                 "selected_number": ("STRING", {"default": ""}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 2**32 - 1})
             }
@@ -29,6 +34,7 @@ class mel_TextSplitNode:
     CATEGORY = "Text"
 
     def process(self, text, delimiter, max_outputs, random_select, selected_number, seed):
+        # --- テキスト前処理：行頭のコメント行および行中の "#" 以降を除去 ---
         cleaned_lines = []
         for line in text.splitlines():
             line = line.strip()
@@ -39,13 +45,13 @@ class mel_TextSplitNode:
             if line:
                 cleaned_lines.append(line)
         text = "\n".join(cleaned_lines)
-        rng = random.Random(seed)
         
+        # --- パターンマッチングで番号指定部分を検出 ---
         pattern = re.compile(r"(\d+(?:\.\d+)*):")
         matches = pattern.finditer(text)
 
         tokens = []
-        assigned_numbers = {}  
+        assigned_numbers = {}  # {トークン: [割り当てられた番号リスト]}
         manual_numbers = set()
 
         last_index = 0
@@ -55,6 +61,7 @@ class mel_TextSplitNode:
             start, end = match.span()
             numbers = list(map(int, match.group(1).split('.')))
 
+            # 直前のテキストを delimiter で区切る
             if last_index < start:
                 chunk = text[last_index:start].strip()
                 if chunk:
@@ -66,8 +73,9 @@ class mel_TextSplitNode:
                             assigned_numbers[sub_token] = current_numbers or []
             current_numbers = numbers
             manual_numbers.update(numbers)
-            last_index = end  
+            last_index = end  # 「数字:」の後ろから新しいトークンを探す
 
+        # 最後の部分を処理
         if last_index < len(text):
             chunk = text[last_index:].strip()
             if chunk:
@@ -78,6 +86,7 @@ class mel_TextSplitNode:
                         tokens.append(sub_token)
                         assigned_numbers[sub_token] = current_numbers or []
 
+        # delimiter で分割されたものに番号が割り振られていない場合、小さい番号を割り振る
         available_numbers = set(range(1, len(tokens) + 1)) - manual_numbers
         num_iterator = iter(sorted(available_numbers))
 
@@ -85,11 +94,13 @@ class mel_TextSplitNode:
         sorted_numbers = []
 
         for token in tokens:
-            if not assigned_numbers[token]: 
+            if not assigned_numbers[token]:  # 番号がない場合、小さい番号を割り振る
                 assigned_numbers[token] = [next(num_iterator)]
             sorted_tokens.append(token)
             sorted_numbers.append(".".join(map(str, assigned_numbers[token])))
 
+        # --- 選択処理 ---
+        # selected_number は文字列入力（例："2 5"）なので、空でない場合はその数字に該当するトークンを選ぶ
         selected_tokens = []
         selected_token_numbers = []
         if selected_number.strip():
@@ -100,6 +111,8 @@ class mel_TextSplitNode:
                     selected_tokens.append(t)
                     selected_token_numbers.append(n)
         
+        # random_select が True の場合、不足分をランダムに補完する
+        rng = random.Random(seed)
         if random_select:
             if len(selected_tokens) < max_outputs:
                 needed = max_outputs - len(selected_tokens)
@@ -116,6 +129,7 @@ class mel_TextSplitNode:
                 selected_indices = rng.sample(range(len(sorted_tokens)), min(max_outputs, len(sorted_tokens)))
                 selected_tokens = [sorted_tokens[i] for i in selected_indices]
                 selected_token_numbers = [sorted_numbers[i] for i in selected_indices]
+        # selected_number が空かつ random_select が False の場合は、シーケンシャルモード（seed を利用して開始位置を決定）
         elif not selected_tokens:
             start_index = seed % len(sorted_tokens)
             selected_indices = [(start_index + i) % len(sorted_tokens) for i in range(max_outputs)]
@@ -123,9 +137,9 @@ class mel_TextSplitNode:
             selected_token_numbers = [sorted_numbers[i] for i in selected_indices]
 
         text_output = ",".join(selected_tokens)
-        number_output = ",".join(selected_token_numbers)  
-
+        number_output = ",".join(selected_token_numbers)
         return (text_output, number_output)
+
 
 class mel_TextSplitNode2:
     @classmethod
@@ -134,7 +148,7 @@ class mel_TextSplitNode2:
             "required": {
                 "text1": ("STRING", {"multiline": True}),
                 "text2": ("STRING", {"multiline": True}),
-                "delimiter": ("STRING", {"default": "/"}),
+                "delimiter": ("STRING", {"default": " "}),
                 "max_outputs": ("INT", {"default": 5, "min": 1, "max": 999}),
                 "random_select": ("BOOLEAN", {"default": False}),
                 "selected_number1": ("STRING", {"default": ""}),
@@ -150,6 +164,8 @@ class mel_TextSplitNode2:
 
     def process(self, text1, text2, delimiter, max_outputs, random_select, selected_number1, selected_number2, seed):
         def process_text(text):
+            # 各行について、先頭が "#" の行は無視し、
+            # 行中にある "#" 以降の文字列も削除してから、空行も除去する
             cleaned_lines = []
             for line in text.splitlines():
                 line = line.strip()
@@ -218,6 +234,7 @@ class mel_TextSplitNode2:
         if len(tokens1) == 0 or len(tokens2) == 0:
             return ("", "")
 
+        # 乱数生成器の初期化（text1, text2 用に seed と seed+1 を使用）
         rng1 = random.Random(seed)
         rng2 = random.Random(seed + 1)
 
@@ -275,17 +292,17 @@ class mel_TextSplitNode2:
         return (text_output, number_output)
     
 class mel_RandomIntNode:
-    counter = {} 
+    counter = {}  # 各シードごとのカウンター
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "max_value": ("INT", {"default": 100, "min": 1, "max": 100}),  
-                "random_select": ("BOOLEAN", {"default": False}),  
-                "increment_mode": ("BOOLEAN", {"default": False}), 
-                "output_max_value": ("BOOLEAN", {"default": False}), 
-                "seed": ("INT", {"default": 0, "min": 0, "max": 2**32 - 1})  
+                "max_value": ("INT", {"default": 100, "min": 1, "max": 100}),  # 上限値（デフォルト100）
+                "random_select": ("BOOLEAN", {"default": False}),  # ランダムモード
+                "increment_mode": ("BOOLEAN", {"default": False}),  # インクリメントモード
+                "output_max_value": ("BOOLEAN", {"default": False}),  # max_value のみ出力するか
+                "seed": ("INT", {"default": 0, "min": 0, "max": 2**32 - 1})  # シード値
             }
         }
 
@@ -296,22 +313,24 @@ class mel_RandomIntNode:
 
     def process(self, max_value, random_select, increment_mode, output_max_value, seed):
         if output_max_value:
-            return (max_value,) 
+            return (max_value,)  # max_value のみ出力
 
         if random_select:
-            seed = random.randint(0, 2**32 - 1)  
+            seed = random.randint(0, 2**32 - 1)  # ランダム選択が有効ならシードをランダムに変更
         
         rng = random.Random(seed)
 
         if increment_mode:
+            # インクリメントモード
             if seed not in self.counter:
-                self.counter[seed] = 1  
+                self.counter[seed] = 1  # 初回は1から
             else:
-                self.counter[seed] += 1  
+                self.counter[seed] += 1  # ＋1増加
                 if self.counter[seed] > max_value:
-                    self.counter[seed] = 1 
+                    self.counter[seed] = 1  # 上限に達したら1に戻る
             random_int = self.counter[seed]
         else:
+            # ランダムモード
             random_int = rng.randint(1, max_value)
 
         return (random_int,)
@@ -336,7 +355,7 @@ class mel_TextFilterNode:
         try:
             exclude_numbers = set(map(int, filter_values.split()))
         except ValueError:
-            exclude_numbers = set() 
+            exclude_numbers = set()  # 変換失敗時は空集合
 
         if filter_number in exclude_numbers:
             return ("" ,)
@@ -368,6 +387,39 @@ class ResolutionSwitcher:
             width, height = height, width
         return (width, height)
 
+
+class AddFileNameonly:
+    @classmethod
+    def INPUT_TYPES(cls):
+         return {
+            "required": {
+                "file_name": ("STRING", {"multiline": False, "default": ""}),
+                "add_date_time": (["disable", "prefix", "postfix", "posnot_"],),
+                "date_time_format": ("STRING", {"multiline": False, "default": "%Y_%m_%d_%H:%M:%S"}),
+            }
+         }
+
+    RETURN_TYPES = ("STRING",)
+    FUNCTION = "add_filename_prefix"
+    CATEGORY = "filename"
+
+    def add_filename_prefix(self, file_name, add_date_time, date_time_format):
+        
+        if add_date_time == "disable":
+            new_name = file_name
+        else:
+            date_str = datetime.datetime.now().strftime(date_time_format)
+            if add_date_time == "prefix":
+                new_name = date_str + "_" + file_name
+            elif add_date_time == "postfix":
+                new_name = file_name + "_" + date_str
+            elif add_date_time == "posnot_":
+                new_name = file_name + date_str
+            else:
+                new_name = file_name
+
+        new_path = os.path.join(new_name)
+        return (new_path,)
     
     
 #ーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーー
@@ -376,7 +428,7 @@ class UnetSelector_gguf:
     RETURN_TYPES = (folder_paths.get_filename_list("unet_gguf"),)
     RETURN_NAMES = ("unet_name",)
     FUNCTION = "get_names" 
-    CATEGORY = 'model_neme'
+    CATEGORY = 'ImageSaverTools/utils'
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -399,14 +451,13 @@ NODE_CLASS_MAPPINGS = {
     "ResolutionSwitcher": ResolutionSwitcher,
     "mel_TextFilterNode": mel_TextFilterNode,
     "Unet Selector_gguf": UnetSelector_gguf,
-    
+    "AddFileNameonly": AddFileNameonly,
+
 }
+
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "mel_TextSplitNode": "mel_TextSplitNode",
-    "mel_TextSplitNode2": "mel_TextSplitNode2",
-    "mel_RandomIntNode": "mel_RandomIntNode",
-    "ResolutionSwitcher": "ResolutionSwitcher",
-    "mel_TextFilterNode": "mel_TextFilterNode",
-    "Unet Selector_gguf": "UnetSelector_gguf",
+    #"mel_TextSplitNode": "mel_Text Split with Selection & Indexing",
+    #"mel_TextSplitNode2": "mel_Text Split with Dual Selection & Indexing2",
+    #"mel_RandomIntNode": "mel_Random Integer with Modes",
     
 }
