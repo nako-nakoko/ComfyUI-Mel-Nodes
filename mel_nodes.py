@@ -387,6 +387,40 @@ class ResolutionSwitcher:
             width, height = height, width
         return (width, height)
 
+class SplitImageBatch:
+    """
+    Splits an input image batch into two batches: first half and second half.
+    """
+    CATEGORY = "image/batch"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),  # Input image batch tensor [B, H, W, C]
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "IMAGE")  # Two output batches
+    FUNCTION = "split_batch"
+    OUTPUT_NODE = False
+    RETURN_NAMES = ("first_batch", "second_batch")
+
+    def split_batch(self, images):
+        """
+        Splits the input tensor along the batch dimension into two halves.
+        If the batch size is odd, the second batch will have one extra image.
+        Args:
+            images (torch.Tensor): Tensor of shape [B, H, W, C]
+        Returns:
+            tuple: (first_half, second_half) as two tensors of shape [B1, H, W, C] and [B2, H, W, C]
+        """
+        batch_size = images.shape[0]
+        half = batch_size // 2
+        first = images[:half]
+        second = images[half:]
+        return (first, second)
+
 
 class AddFileNameonly:
     @classmethod
@@ -452,6 +486,7 @@ NODE_CLASS_MAPPINGS = {
     "mel_TextFilterNode": mel_TextFilterNode,
     "Unet Selector_gguf": UnetSelector_gguf,
     "AddFileNameonly": AddFileNameonly,
+    "Split Image Batch": SplitImageBatch,
 
 }
 
